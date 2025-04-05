@@ -10,16 +10,16 @@ export function activate(context: vscode.ExtensionContext) {
         context.subscriptions.push(registeredCommand);
     }
 
-    addCommand('helloworld.bracketsPrettify', bracketsPrettify);
+    addCommand('decondenser.bracketsPrettify', () => {
+        bracketsPrettify(false);
+    });
 
-    // TODO configuration
-    // if (!vscode.workspace.getConfiguration("bracketsprettify").get("enable")) {
-    //     return;
-    // }
+    addCommand('decondenser.bracketsPrettify.unescape', () => {
+        bracketsPrettify(true);
+    });
 }
 
-
-function bracketsPrettify() {
+function bracketsPrettify(unescape: boolean) {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
         return;
@@ -33,55 +33,109 @@ function bracketsPrettify() {
     } else {
         selection = editor.selection;
     }
-
     const uglyText = editor.document.getText(selection);
-    const prettyText = formatPrettyText(uglyText);
+
+    if (uglyText.length === 0) {
+        return;
+    }
+
+    let text;
+    if (unescape) {
+        text = unescapeText(uglyText);
+    } else {
+        text = uglyText;
+    }
+
+    const indentationSize = vscode.workspace.getConfiguration("decondenser").get("indentationSize");
+    let prettyText;
+    if (typeof indentationSize === "number") {
+        const indentation = " ".repeat(indentationSize);
+        prettyText = formatUglyText(text, indentation);
+    } else {
+        prettyText = formatUglyText(text, "    ");
+    }
 
     editor.edit((editBuilder) => {
         editBuilder.replace(selection, prettyText);
     });
 }
 
+export function unescapeText(input: string): string {
+    let output: string[] = [];
+    let backslash = false;
+
+    for (const char of input) {
+        if (backslash) {
+            switch (char) {
+                case "n": {
+                    output.push("\n");
+                    break;
+                }
+                case "r": {
+                    output.push("\r");
+                    break;
+                }
+                case "t": {
+                    output.push("\t");
+                    break;
+                }
+                default: {
+                    output.push(char);
+                }
+            }
+            backslash = false;
+
+            continue;
+        }
+
+        if (char === "\\") {
+            backslash = true;
+            continue;
+        }
+
+        output.push(char);
+    }
+
+    return output.join("");
+}
+
 enum State {
     // This state is assigned:
     // - at the start of parsing
-    // - when met \ after comma | key: value,\
+    // - when met \ after comma: key: value,\
     // - when met " end of the string
-    // - when met open bracket after comma | [[1],[2]]
-    // - when met closing bracket after comma (no trailing comma added) | [[1,2,]]
-    // - when met any character after comma | {key1: value1,key2: [1,2,3]}
+    // - when met open bracket after comma: [[1],[2]]
+    // - when met closing bracket after comma (no trailing comma added): [[1,2,]]
+    // - when met any character after comma: {key1: value1,key2: [1,2,3]}
     Start,
     // This state is assigned:
-    // - when met \ is escape mode | "\\abc"
-    // - when met " start of the string | {key: "abc"}
-    // - when met " after comma | {"key1", "value1","key2": "value2"}
-    // - when met open bracket in escape mode | "\{"
-    // - when met closing bracket in escape mode | "\}"
-    // - when met any character in escape mode | "\a"
+    // - when met " start of the string: {key: "abc"}
+    // - when met \ is escape state: "\\abc"
+    // - when met " after comma: ["value1","value2", "value3"]
+    // - when met any character in escape state: "\X"
     String,
     // This state is assigned:
-    // - when met \ in string | "\"
+    // - when met \ in string: "\"
     Escape,
     // This state is assigned:
-    // - when met , in State.Start state | [1,2,3,] | {key: value,}
+    // - when met , in start state: [1,2,3,] | {key: value,}
     AfterComma,
 }
 
-function formatPrettyText(input: string): string {
-    function pushAfterCommaAndIndent(character: string): string[] {
-        return output.concat([",\n", createIndentation(indentLevel), character]);
-    }
-
-    function createIndentation(indentLevel: number): string {
-        return "    ".repeat(Math.abs(indentLevel));
-    }
-
+export function formatUglyText(input: string, indentation: string): string {
     let state: State = (() => {
         return State.Start;
     })();
     let output: string[] = [];
     let indentLevel = 0;
-    let isEscapedOuter = false;
+
+    function pushAfterCommaAndIndent(character: string): string[] {
+        return output.concat([",\n", createIndentation(indentLevel), character]);
+    }
+
+    function createIndentation(indentLevel: number): string {
+        return indentation.repeat(Math.abs(indentLevel));
+    }
 
     for (const char of input) {
         switch (char) {
@@ -89,8 +143,6 @@ function formatPrettyText(input: string): string {
                 switch (state) {
                     case State.Start: {
                         output.push("\\");
-
-                        isEscapedOuter = true;
                         break;
                     }
                     case State.String: {
@@ -132,14 +184,13 @@ function formatPrettyText(input: string): string {
                         break;
                     }
                     case State.Escape: {
-                        // escaped \ in string
+                        // escaped " in string
                         state = State.String;
                         output.push("\"");
                         break;
                     }
                     case State.AfterComma: {
                         // met " after comma
-                        // similar to JSON :)
                         state = State.String;
                         output = pushAfterCommaAndIndent("\"");
                         break;
@@ -161,6 +212,7 @@ function formatPrettyText(input: string): string {
                         break;
                     }
                     case State.Escape: {
+                        state = State.String;
                         output.push(" ");
                         break;
                     }
@@ -177,22 +229,19 @@ function formatPrettyText(input: string): string {
                 switch (state) {
                     case State.Start: {
                         state = State.AfterComma;
-
                         break;
                     }
                     case State.String: {
                         output.push(",");
-
                         break;
                     }
                     case State.Escape: {
+                        state = State.String;
                         output.push(",");
-
                         break;
                     }
                     case State.AfterComma: {
                         output.push(",");
-
                         break;
                     }
                     default: state satisfies never;
@@ -203,72 +252,64 @@ function formatPrettyText(input: string): string {
 
             case "(":
             case "[":
-            case "{":
-                {
-                    switch (state) {
-                        case State.Start: {
-                            indentLevel = indentLevel + 1;
-                            output = output.concat([char, "\n", createIndentation(indentLevel)]);
-                            break;
-                        }
-                        case State.String: {
-                            output.push(char);
-
-                            break;
-                        }
-                        case State.Escape: {
-                            output.push(char);
-
-                            break;
-                        }
-                        case State.AfterComma: {
-                            state = State.Start;
-
-                            output = pushAfterCommaAndIndent(char);
-                            indentLevel = indentLevel + 1;
-                            output = output.concat(["\n", createIndentation(indentLevel)]);
-                            break;
-                        }
-                        default: state satisfies never;
+            case "{": {
+                switch (state) {
+                    case State.Start: {
+                        indentLevel = indentLevel + 1;
+                        output = output.concat([char, "\n", createIndentation(indentLevel)]);
+                        break;
                     }
-
-                    break;
+                    case State.String: {
+                        output.push(char);
+                        break;
+                    }
+                    case State.Escape: {
+                        state = State.String;
+                        output.push(char);
+                        break;
+                    }
+                    case State.AfterComma: {
+                        state = State.Start;
+                        output = pushAfterCommaAndIndent(char);
+                        indentLevel = indentLevel + 1;
+                        output = output.concat(["\n", createIndentation(indentLevel)]);
+                        break;
+                    }
+                    default: state satisfies never;
                 }
+
+                break;
+            }
 
             case ")":
             case "]":
-            case "}":
-                {
-                    switch (state) {
-                        case State.Start: {
-                            indentLevel = indentLevel - 1;
-                            output = output.concat(["\n", createIndentation(indentLevel), char]);
-
-                            break;
-                        }
-                        case State.String: {
-                            output.push(char);
-
-                            break;
-                        }
-                        case State.Escape: {
-                            state = State.String;
-
-                            output.push(char);
-                            break;
-                        }
-                        case State.AfterComma: {
-                            state = State.Start;
-
-                            indentLevel = indentLevel - 1;
-                            output = output.concat(["\n", createIndentation(indentLevel), char]);
-                            break;
-                        }
-                        default: state satisfies never;
+            case "}": {
+                switch (state) {
+                    case State.Start: {
+                        indentLevel = indentLevel - 1;
+                        output = output.concat(["\n", createIndentation(indentLevel), char]);
+                        break;
                     }
-
-                    break;
+                    case State.String: {
+                        output.push(char);
+                        break;
+                    }
+                    case State.Escape: {
+                        state = State.String;
+                        output.push(char);
+                        break;
+                    }
+                    case State.AfterComma: {
+                        state = State.Start;
+                        indentLevel = indentLevel - 1;
+                        output = output.concat(["\n", createIndentation(indentLevel), char]);
+                        break;
+                    }
+                    default: state satisfies never;
                 }
+
+                break;
+            }
 
             default: {
                 switch (state) {
@@ -281,15 +322,12 @@ function formatPrettyText(input: string): string {
                         break;
                     }
                     case State.Escape: {
-                        // TODO escape \n, \t, \r as characters
                         state = State.String;
-
                         output.push(char);
                         break;
                     }
                     case State.AfterComma: {
                         state = State.Start;
-
                         output = pushAfterCommaAndIndent(char);
                         break;
                     }
